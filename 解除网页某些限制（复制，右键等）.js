@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         解除网页某些限制（复制，右键等）
-// @namespace    https://github.com/YC-CLT/-Tampermonkey-Scripts
-// @version      v1.1
+// @namespace    https://github.com/YC-CLT/TampermonkeyScripts
+// @version      v2.0
 // @license      MIT
-// @description  解除右键菜单禁用以及 Ctrl+C / Ctrl+V / Ctrl+X / Ctrl+A 等快捷键的拦截，让你在任何网页都能自由复制、粘贴和右键。支持单页应用(SPA)路由切换。
+// @description  彻底解除右键菜单禁用、复制快捷键拦截，支持 SPA 路由切换，针对 document.oncontextmenu / onkeydown + returnValue + alert 全面防御。
 // @author       逸畅_celestial
 // @include      http*://**
 // @run-at       document-start
@@ -15,9 +15,63 @@
 (function() {
     'use strict';
 
-    // ----- 核心钩子：重写 preventDefault -----
-    const originalPreventDefault = Event.prototype.preventDefault;
+    // ---------- 1. 锁定 returnValue（历史遗留属性，页面经常用）----------
+    if (Event.prototype.hasOwnProperty('returnValue')) {
+        const originalReturnValueDesc = Object.getOwnPropertyDescriptor(Event.prototype, 'returnValue');
+        Object.defineProperty(Event.prototype, 'returnValue', {
+            get: function() {
+                return originalReturnValueDesc ? originalReturnValueDesc.get.call(this) : undefined;
+            },
+            set: function(value) {
+                // 完全忽略设置 returnValue = false 的行为
+                // 不执行任何操作，让右键和快捷键不被阻止
+                return;
+            },
+            configurable: false,
+            enumerable: true
+        });
+    }
 
+    // ---------- 2. 劫持 document.oncontextmenu 和 document.onkeydown ----------
+    // 防止页面直接赋值 (document.oncontextmenu = function...)
+    function hijackDocumentEventProp(propName) {
+        // 获取原型上的描述符（Document.prototype 或 HTMLDocument.prototype）
+        let proto = Document.prototype;
+        let descriptor = Object.getOwnPropertyDescriptor(proto, propName);
+        if (!descriptor && HTMLDocument.prototype) {
+            descriptor = Object.getOwnPropertyDescriptor(HTMLDocument.prototype, propName);
+        }
+        if (descriptor && descriptor.set) {
+            const originalSetter = descriptor.set;
+            // 重新定义 document 实例上的该属性（阻止后续赋值）
+            Object.defineProperty(document, propName, {
+                set: function(fn) {
+                    // 页面试图赋值，直接丢弃（不做任何事）
+                    console.debug(`[Script] Blocked setting ${propName}`);
+                },
+                get: function() {
+                    // 返回 null，确保没有处理函数阻止默认行为
+                    return null;
+                },
+                configurable: false
+            });
+        }
+    }
+    hijackDocumentEventProp('oncontextmenu');
+    hijackDocumentEventProp('onkeydown');
+
+    // ---------- 3. 覆盖 alert，过滤掉“禁止”相关的弹窗（可选）----------
+    const originalAlert = window.alert;
+    window.alert = function(msg) {
+        if (typeof msg === 'string' && (msg.includes('禁止') || msg.includes('右键') || msg.includes('复制'))) {
+            // 静默拦截，不弹窗
+            return;
+        }
+        originalAlert(msg);
+    };
+
+    // ---------- 4. 原有的 preventDefault 钩子（防止 addEventListener 方式拦截）----------
+    const originalPreventDefault = Event.prototype.preventDefault;
     function isAllowedShortcut(event) {
         if (event.type !== 'keydown') return false;
         const ctrlOrCmd = event.ctrlKey || event.metaKey;
@@ -26,79 +80,61 @@
         if ((event.ctrlKey && key === 'Insert') || (event.shiftKey && key === 'Insert')) return true;
         return false;
     }
-
     function patchedPreventDefault() {
         if (this.type === 'contextmenu') return;
         if (isAllowedShortcut(this)) return;
         originalPreventDefault.call(this);
     }
-
-    // 直接替换原型方法
     Event.prototype.preventDefault = patchedPreventDefault;
-
-    // ----- 锁定原型方法，防止网页后续覆盖 -----
     Object.defineProperty(Event.prototype, 'preventDefault', {
         value: patchedPreventDefault,
-        writable: false,   // 不可重写
-        configurable: false // 不可删除或重新配置
+        writable: false,
+        configurable: false
     });
 
-    // ----- 增加捕获层监听（强力后备）-----
+    // ---------- 5. 捕获层空监听（确保事件流经过，以及防止 stopPropagation）----------
     function addCaptureListeners() {
-        // 移除可能存在的旧监听器（避免重复，但无大碍）
         document.removeEventListener('contextmenu', noopCapture, true);
         document.removeEventListener('keydown', noopCapture, true);
-        // 添加新的捕获监听，确保事件流中总能执行（哪怕网页用了 stopPropagation）
         document.addEventListener('contextmenu', noopCapture, true);
         document.addEventListener('keydown', noopCapture, true);
     }
-
-    function noopCapture() {
-        // 完全空操作，仅用来保证捕获阶段有我们的监听器
-        // 真正起作用的仍然是原型上的 preventDefault 覆盖
-    }
-
-    // 初始调用
+    function noopCapture() {}
     if (document.documentElement) {
         addCaptureListeners();
     } else {
-        // 如果 document 还没准备好，等待 DOMContentLoaded
         document.addEventListener('DOMContentLoaded', addCaptureListeners);
     }
 
-    // ----- 针对 SPA 路由切换的额外保护 -----
-    // 拦截 history.pushState / replaceState，在路由变化后重新确保钩子稳固
-    const originalPushState = history.pushState;
-    const originalReplaceState = history.replaceState;
-
-    function onRouteChange() {
-        // 虽然 preventDefault 已经被锁定，但某些网页可能移除我们添加的捕获监听器
-        // 因此重新添加一次（幂等操作，无害）
+    // ---------- 6. SPA 路由切换后重新强化保护 ----------
+    function reapplyProtection() {
+        // 防止某些 SPA 框架动态移除 capture 监听器
         addCaptureListeners();
-        // 可选：输出日志，便于调试（默认注释）
-        // console.log('[Script] Route changed, re-secured hooks.');
+        // 确保 oncontextmenu / onkeydown 仍被劫持（虽然 defineProperty 已锁定，但保险起见再调用一次）
+        hijackDocumentEventProp('oncontextmenu');
+        hijackDocumentEventProp('onkeydown');
     }
 
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
     history.pushState = function(...args) {
         originalPushState.apply(this, args);
-        onRouteChange();
+        setTimeout(reapplyProtection, 0);
     };
     history.replaceState = function(...args) {
         originalReplaceState.apply(this, args);
-        onRouteChange();
+        setTimeout(reapplyProtection, 0);
     };
-    window.addEventListener('popstate', onRouteChange);
+    window.addEventListener('popstate', reapplyProtection);
+    window.addEventListener('hashchange', reapplyProtection);
 
-    // 对于使用 hash 路由的页面（如 #/xxx）
-    window.addEventListener('hashchange', onRouteChange);
-
-    // 额外：利用 MutationObserver 监听 head/title 变化，增强路由变化检测（可选）
+    // MutationObserver 监听 URL 变化（额外保险）
     let lastUrl = location.href;
     const observer = new MutationObserver(() => {
         const url = location.href;
         if (url !== lastUrl) {
             lastUrl = url;
-            onRouteChange();
+            reapplyProtection();
         }
     });
     observer.observe(document, { subtree: true, childList: true });
