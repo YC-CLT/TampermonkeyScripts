@@ -1,20 +1,18 @@
 // ==UserScript==
 // @name         解除网页某些限制（复制，右键等）
 // @namespace    https://github.com/YC-CLT/TampermonkeyScripts
-// @version      v2.0
+// @version      2.2
 // @license      MIT
-// @description  彻底解除右键菜单禁用、复制快捷键拦截，支持 SPA 路由切换，针对 document.oncontextmenu / onkeydown + returnValue + alert 全面防御。
+// @description  解除右键菜单禁用、复制快捷键拦截，支持 SPA 路由切换，针对 document.oncontextmenu / onkeydown + returnValue + alert 全面防御。
 // @author       逸畅_celestial
 // @include      http*://**
 // @run-at       document-start
 // @grant        none
-// @downloadURL  https://update.greasyfork.org/scripts/占位符
-// @updateURL    https://update.greasyfork.org/scripts/占位符
 // ==/UserScript==
-
+ 
 (function() {
     'use strict';
-
+ 
     // ---------- 1. 锁定 returnValue（历史遗留属性，页面经常用）----------
     if (Event.prototype.hasOwnProperty('returnValue')) {
         const originalReturnValueDesc = Object.getOwnPropertyDescriptor(Event.prototype, 'returnValue');
@@ -31,7 +29,7 @@
             enumerable: true
         });
     }
-
+ 
     // ---------- 2. 劫持 document.oncontextmenu 和 document.onkeydown ----------
     // 防止页面直接赋值 (document.oncontextmenu = function...)
     function hijackDocumentEventProp(propName) {
@@ -59,7 +57,7 @@
     }
     hijackDocumentEventProp('oncontextmenu');
     hijackDocumentEventProp('onkeydown');
-
+ 
     // ---------- 3. 覆盖 alert，过滤掉“禁止”相关的弹窗（可选）----------
     const originalAlert = window.alert;
     window.alert = function(msg) {
@@ -69,7 +67,7 @@
         }
         originalAlert(msg);
     };
-
+ 
     // ---------- 4. 原有的 preventDefault 钩子（防止 addEventListener 方式拦截）----------
     const originalPreventDefault = Event.prototype.preventDefault;
     function isAllowedShortcut(event) {
@@ -91,7 +89,7 @@
         writable: false,
         configurable: false
     });
-
+ 
     // ---------- 5. 捕获层空监听（确保事件流经过，以及防止 stopPropagation）----------
     function addCaptureListeners() {
         document.removeEventListener('contextmenu', noopCapture, true);
@@ -105,7 +103,7 @@
     } else {
         document.addEventListener('DOMContentLoaded', addCaptureListeners);
     }
-
+ 
     // ---------- 6. SPA 路由切换后重新强化保护 ----------
     function reapplyProtection() {
         // 防止某些 SPA 框架动态移除 capture 监听器
@@ -114,7 +112,7 @@
         hijackDocumentEventProp('oncontextmenu');
         hijackDocumentEventProp('onkeydown');
     }
-
+ 
     const originalPushState = history.pushState;
     const originalReplaceState = history.replaceState;
     history.pushState = function(...args) {
@@ -127,7 +125,7 @@
     };
     window.addEventListener('popstate', reapplyProtection);
     window.addEventListener('hashchange', reapplyProtection);
-
+ 
     // MutationObserver 监听 URL 变化（额外保险）
     let lastUrl = location.href;
     const observer = new MutationObserver(() => {
@@ -138,4 +136,22 @@
         }
     });
     observer.observe(document, { subtree: true, childList: true });
+ 
+    // ---------- 7. 学习通粘贴限制解除 ----------
+    (function() {
+        // 直接覆盖，永久允许粘贴
+        window.editorPaste = function() { return true; };
+        Object.defineProperty(window, 'editorPaste', {
+            value: window.editorPaste,
+            writable: false,
+            configurable: false
+        });
+        // 可选：劫持 defineProperty 防止页面重新定义
+        const originalDefineProperty = Object.defineProperty;
+        Object.defineProperty = function(obj, prop, descriptor) {
+            if (obj === window && prop === 'editorPaste') return;
+            return originalDefineProperty.apply(this, arguments);
+        };
+    })();
 })();
+
